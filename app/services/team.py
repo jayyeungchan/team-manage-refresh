@@ -81,8 +81,7 @@ class TeamService:
         if error_code == "ghost_success":
             logger.error(f"检测到 Team {team.id} ({team.email}) 存在“虚假成功”现象 (邀请返回 200 但列表无成员)，标记为 error")
             team.status = "error"
-            if not db_session.in_transaction():
-                await db_session.commit()
+            await db_session.commit()
             return True
 
         if is_banned:
@@ -96,8 +95,7 @@ class TeamService:
                 
             logger.warning(f"检测到账号{status_desc} (code={error_code}, msg={error_msg}), 更新 Team {team.id} ({team.email}) 状态为 banned")
             team.status = "banned"
-            if not db_session.in_transaction():
-                await db_session.commit()
+            await db_session.commit()
             return True
 
         # 2. 判定是否为“席位已满”错误
@@ -113,8 +111,7 @@ class TeamService:
                 # 进位修正，确保逻辑闭环
                 team.current_members = team.max_members
 
-            if not db_session.in_transaction():
-                await db_session.commit()
+            await db_session.commit()
             return True
 
         # 2.5 判定是否为“已在团队中” (这通常被视为成功的变种)
@@ -144,11 +141,13 @@ class TeamService:
         # 如果是 Token 过期，尝试立即刷新一次（为下次重试做准备）
         if is_token_expired:
             logger.info(f"Team {team.id} Token 过期，尝试后台刷新...")
-            # 注意：此处不等待刷新结果，仅作为修复尝试
-            await self.ensure_access_token(team, db_session)
-            
-        if not db_session.in_transaction():
-            await db_session.commit()
+            # 注意：此处会根据刷新结果立即修正状态，避免前端仍显示 active
+            refreshed_token = await self.ensure_access_token(team, db_session)
+            if not refreshed_token and team.status != "banned":
+                logger.error(f"Team {team.id} Token 过期且刷新失败，立即标记为 expired")
+                team.status = "expired"
+
+        await db_session.commit()
         return True
         
     async def _reset_error_status(self, team: Team, db_session: AsyncSession) -> None:
@@ -167,8 +166,7 @@ class TeamService:
             else:
                 logger.info(f"Team {team.id} ({team.email}) 请求成功, 将状态从 error 恢复为 active")
                 team.status = "active"
-        if not db_session.in_transaction():
-            await db_session.commit()
+        await db_session.commit()
 
     async def ensure_access_token(self, team: Team, db_session: AsyncSession, force_refresh: bool = False) -> Optional[str]:
         """
@@ -269,8 +267,7 @@ class TeamService:
             logger.error(f"Team {team.id} Token 已过期且无法刷新，标记为 expired")
             team.status = "expired"
             team.error_count = (team.error_count or 0) + 1
-        if not db_session.in_transaction():
-            await db_session.commit()
+        await db_session.commit()
         return None
 
     async def proactive_refresh_tokens(
@@ -1058,6 +1055,11 @@ class TeamService:
                         "message": None,
                         "error": "Team 账号已封禁/失效 (token_invalidated)"
                     }
+
+                if team.status != "expired":
+                    team.status = "expired"
+                    await db_session.commit()
+
                 return {
                     "success": False,
                     "message": None,
@@ -1270,10 +1272,7 @@ class TeamService:
             team.error_count = 0  # 同步成功，重置错误次数
             team.last_sync = get_now()
 
-            if not db_session.in_transaction():
-                await db_session.commit()
-            else:
-                await db_session.flush()
+            await db_session.commit()
 
             logger.info(f"Team 同步成功: ID {team_id}, 成员数 {current_members}")
 
