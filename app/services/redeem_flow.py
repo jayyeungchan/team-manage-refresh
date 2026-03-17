@@ -6,7 +6,7 @@ import logging
 import asyncio
 import traceback
 from collections import defaultdict
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 from datetime import datetime, timedelta
 from sqlalchemy import select, update, delete, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,8 @@ from app.services.settings import (
 from app.utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
+
+ALREADY_IN_TEAM_KEYWORDS = ["already in workspace", "already in team", "already a member"]
 
 # 全局兑换锁: 针对 code 进行加锁，防止同一个码并发请求
 _code_locks = defaultdict(asyncio.Lock)
@@ -118,13 +120,27 @@ class RedeemFlowService:
     async def select_team_auto(
         self,
         db_session: AsyncSession,
+        email: Optional[str] = None,
         exclude_team_ids: Optional[List[int]] = None,
         pool_type: str = "normal"
     ) -> Dict[str, Any]:
         """
-        自动选择一个可用的 Team
+        自动选择一个可用的 Team。
+        如果提供邮箱，优先使用本地 Team-邮箱映射表排除该邮箱已占用的 Team。
         """
         try:
+            excluded_ids = set(exclude_team_ids or [])
+            mapped_team_ids = set()
+            if email:
+                mapped_team_ids = set(
+                    await self.team_service.get_active_team_ids_for_email(
+                        email,
+                        db_session,
+                        pool_type=pool_type
+                    )
+                )
+                excluded_ids.update(mapped_team_ids)
+
             # 查找所有 active 且未满的 Team
             stmt = select(Team).where(
                 Team.status == "active",
@@ -132,8 +148,8 @@ class RedeemFlowService:
                 Team.pool_type == pool_type
             )
             
-            if exclude_team_ids:
-                stmt = stmt.where(Team.id.not_in(exclude_team_ids))
+            if excluded_ids:
+                stmt = stmt.where(Team.id.not_in(sorted(excluded_ids)))
             
             # 按 Team ID 从小到大顺序分配：当前 Team 满员后再轮到下一个 Team
             stmt = stmt.order_by(Team.id.asc())
@@ -143,7 +159,9 @@ class RedeemFlowService:
 
             if not team:
                 reason = "没有可用的 Team"
-                if exclude_team_ids:
+                if mapped_team_ids:
+                    reason = "没有新的可用 Team；您已加入所有当前有席位的 Team，当前兑换码不会被消耗"
+                elif exclude_team_ids:
                     reason = "您已加入所有可用 Team"
                 return {
                     "success": False,
@@ -152,7 +170,6 @@ class RedeemFlowService:
                 }
 
             logger.info(f"自动选择 Team: {team.id}")
-
             return {
                 "success": True,
                 "team_id": team.id,
@@ -178,11 +195,13 @@ class RedeemFlowService:
         完整的兑换流程 (带事务和并发控制)
         """
         last_error = "未知错误"
-        max_retries = 3
+        max_retries = 5
         current_target_team_id = team_id
         core_success = False
         success_result = None
         team_id_final = None
+        selected_team_locked = team_id is not None
+        excluded_team_ids: Set[int] = set()
 
         # 针对 code 加锁，防止同一个码并发进入兑换
         async with _code_locks[code]:
@@ -199,10 +218,32 @@ class RedeemFlowService:
                     pool_type = code_meta.get("pool_type", "normal")
                     is_virtual_welfare_code = bool(code_meta.get("virtual_welfare_code"))
 
+                    if selected_team_locked:
+                        existing_team_ids = set(
+                            await self.team_service.get_active_team_ids_for_email(
+                                email,
+                                db_session,
+                                pool_type=pool_type
+                            )
+                        )
+                        if team_id in existing_team_ids:
+                            return {
+                                "success": False,
+                                "error": (
+                                    f"您已在 Team {team_id} 中，当前兑换码不会被消耗。"
+                                    "如需新的工作空间，请选择其他 Team。"
+                                )
+                            }
+
                     # 确定目标 Team (初选)
                     team_id_final = current_target_team_id
                     if not team_id_final:
-                        select_res = await self.select_team_auto(db_session, pool_type=pool_type)
+                        select_res = await self.select_team_auto(
+                            db_session,
+                            email=email,
+                            exclude_team_ids=sorted(excluded_team_ids) if excluded_team_ids else None,
+                            pool_type=pool_type
+                        )
                         if not select_res["success"]:
                             return {"success": False, "error": select_res["error"]}
                         team_id_final = select_res["team_id"]
@@ -217,9 +258,6 @@ class RedeemFlowService:
                             await db_session.rollback()
                         elif db_session.is_active:
                             await db_session.rollback()
-
-                        # 1. 前置同步：拉人前确保人数状态绝对实时 (耗时操作)
-                        await self.team_service.sync_team_info(team_id_final, db_session)
                         
                         # 2. 核心校验 (开启短事务)
                         if not db_session.in_transaction():
@@ -301,8 +339,29 @@ class RedeemFlowService:
                             if not invite_res["success"]:
                                 err = invite_res.get("error", "邀请失败")
                                 err_str = str(err).lower()
-                                if any(kw in err_str for kw in ["already in workspace", "already in team", "already a member"]):
-                                    logger.info(f"用户 {email} 已经在 Team {team_id_final} 中，视为兑换成功")
+                                if any(kw in err_str for kw in ALREADY_IN_TEAM_KEYWORDS):
+                                    if db_session.in_transaction():
+                                        await db_session.rollback()
+                                    await self.team_service.upsert_team_email_mapping(
+                                        team_id_final,
+                                        email,
+                                        status="joined",
+                                        db_session=db_session,
+                                        source="api"
+                                    )
+                                    await db_session.commit()
+                                    message = (
+                                        f"您已在 Team {team_id_final} 中，当前兑换码不会被消耗。"
+                                        "如需新的工作空间，请选择其他 Team。"
+                                    )
+                                    if selected_team_locked:
+                                        return {"success": False, "error": message}
+
+                                    excluded_team_ids.add(team_id_final)
+                                    current_target_team_id = None
+                                    raise Exception(
+                                        f"该邮箱已在 Team {team_id_final} 中，自动切换其他 Team"
+                                    )
                                 else:
                                     if any(kw in err_str for kw in ["maximum number of seats", "full", "no seats"]):
                                         target_team.status = "full"
@@ -384,6 +443,13 @@ class RedeemFlowService:
                                 is_warranty_redemption=(bool(rc and rc.has_warranty and (not rc.reusable_by_seat)))
                             )
                             db_session.add(record)
+                            await self.team_service.upsert_team_email_mapping(
+                                team_id_final,
+                                email,
+                                status="invited",
+                                db_session=db_session,
+                                source="redeem"
+                            )
                             target_team.current_members += 1
                             if target_team.current_members >= target_team.max_members:
                                 target_team.status = "full"
@@ -422,7 +488,7 @@ class RedeemFlowService:
                         pass
                     
                     # 判读是否中断重试
-                    if any(kw in last_error for kw in ["不存在", "已使用", "已有正在使用", "质保已过期"]):
+                    if any(kw in last_error for kw in ["不存在", "已使用", "已有正在使用", "质保已过期", "当前兑换码不会被消耗"]):
                         return {"success": False, "error": last_error}
 
                     # 判定是否需要永久标记为“满员”
