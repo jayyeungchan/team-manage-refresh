@@ -903,6 +903,7 @@
         if (status) {
             url.searchParams.set('status_filter', status);
         } else {
+            url.searchParams.delete('status');
             url.searchParams.delete('status_filter');
         }
         url.searchParams.set('page', 1);

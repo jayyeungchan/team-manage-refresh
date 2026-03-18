@@ -5,7 +5,7 @@
 import logging
 import re
 from typing import Optional, List, Dict, Literal
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import json
 from sqlalchemy import select, func, update
@@ -134,7 +134,7 @@ async def admin_dashboard(
     per_page: int = 20,
     search: Optional[str] = None,
     status_filter: Optional[str] = None,
-    status: Optional[str] = None,
+    legacy_status: Optional[str] = Query(None, alias="status"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_admin)
 ):
@@ -143,8 +143,8 @@ async def admin_dashboard(
     """
     try:
         from app.main import templates
-        if status_filter is None and status is not None:
-            status_filter = status
+        if status_filter is None and legacy_status is not None:
+            status_filter = legacy_status
 
         logger.info(f"管理员访问控制台, search={search}, page={page}, per_page={per_page}, status_filter={status_filter}")
 
@@ -204,7 +204,7 @@ async def welfare_dashboard(
     per_page: int = 20,
     search: Optional[str] = None,
     status_filter: Optional[str] = None,
-    status: Optional[str] = None,
+    legacy_status: Optional[str] = Query(None, alias="status"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_admin)
 ):
@@ -212,8 +212,8 @@ async def welfare_dashboard(
     try:
         from app.main import templates
 
-        if status_filter is None and status is not None:
-            status_filter = status
+        if status_filter is None and legacy_status is not None:
+            status_filter = legacy_status
 
         teams_result = await team_service.get_all_teams(db, page=page, per_page=per_page, search=search, status=status_filter, pool_type="welfare")
         team_stats = await team_service.get_stats(db, pool_type="welfare")
