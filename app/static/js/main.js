@@ -210,6 +210,27 @@ function setSingleImportMode(mode = 'quick') {
     manualSection.style.display = isManual ? 'block' : 'none';
 }
 
+function syncResponsiveSidebarMount() {
+    const sidebar = document.getElementById('adminSidebar');
+    const overlay = document.getElementById('sidebarOverlay');
+    const mainContainer = document.querySelector('.main-container');
+    const mainContent = document.querySelector('.main-content');
+    if (!sidebar || !overlay || !mainContainer || !mainContent) return;
+
+    const isMobileLayout = window.matchMedia('(max-width: 768px)').matches;
+
+    if (isMobileLayout) {
+        if (sidebar.parentElement !== document.body) {
+            overlay.insertAdjacentElement('afterend', sidebar);
+        }
+        return;
+    }
+
+    if (sidebar.parentElement !== mainContainer) {
+        mainContainer.insertBefore(sidebar, mainContent);
+    }
+}
+
 // 页面加载完成后执行
 document.addEventListener('DOMContentLoaded', function () {
     // 检查认证状态
@@ -217,6 +238,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
     cleanupLegacyThemeSettingsSection();
     initThemeSwitcher();
+    syncResponsiveSidebarMount();
+    window.addEventListener('resize', syncResponsiveSidebarMount);
 
     // OAuth 一键导入按钮绑定（避免仅依赖内联 onclick）
     const btnOneClickToken = document.getElementById('btnOneClickToken');
