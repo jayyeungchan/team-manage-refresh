@@ -1302,7 +1302,7 @@ body.admin-theme .toast {
     bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
     width: min(360px, calc(100% - 2rem));
     --toast-offset: calc(100% + 16px);
-    z-index: 2100;
+    z-index: 4100;
     background: color-mix(in srgb, var(--toast-bg) 96%, var(--bg-surface) 4%);
     color: var(--text-main);
     border-color: color-mix(in srgb, var(--toast-border) 85%, var(--border-base) 15%);

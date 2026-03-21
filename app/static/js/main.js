@@ -123,10 +123,12 @@ async function initThemeSwitcher() {
 // Toast 提示函数
 let toastTimer = null;
 
+function hasVisibleModal() {
+    return !!document.querySelector('.modal-overlay.show');
+}
+
 function getToastMountTarget() {
-    const overlays = document.querySelectorAll('.modal-overlay.show');
-    const topmostOverlay = overlays.length ? overlays[overlays.length - 1] : null;
-    return topmostOverlay || document.body;
+    return document.body;
 }
 
 function syncToastMountTarget() {
@@ -138,7 +140,7 @@ function syncToastMountTarget() {
         target.appendChild(toast);
     }
 
-    toast.classList.toggle('in-modal', target !== document.body);
+    toast.classList.toggle('in-modal', hasVisibleModal());
 }
 
 function showToast(message, type = 'info') {
